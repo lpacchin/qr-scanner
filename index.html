@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Scanner QR — Camera</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;display:flex;flex-direction:column;align-items:center;gap:12px;padding:18px;background:#f6f7fb;color:#111}
+    .card{max-width:900px;width:100%;background:white;padding:12px;border-radius:10px;box-shadow:0 6px 18px rgba(20,30,60,0.08)}
+    video{width:100%;height:auto;border-radius:8px;background:#000}
+    .controls{display:flex;gap:8px;flex-wrap:wrap}
+    button{padding:8px 12px;border-radius:8px;border:1px solid #ddd;background:#fff;cursor:pointer}
+    button.primary{background:#0b69ff;color:white;border-color:transparent}
+    #result{word-break:break-all;padding:8px;background:#f3f6ff;border-radius:6px}
+    .hidden{display:none}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Scanner QR con fotocamera</h2>
+    <p>Pagina semplice che apre la camera, rileva QR code e mostra il contenuto. Funziona su HTTPS o su <code>localhost</code>.</p>
+
+    <div>
+      <video id="video" muted playsinline></video>
+    </div>
+
+    <div class="controls">
+      <button id="startBtn" class="primary">Avvia camera</button>
+      <button id="stopBtn">Ferma</button>
+      <select id="cameraSelect"></select>
+      <button id="flipBtn">Cambia fotocamera</button>
+      <label style="display:flex;gap:6px;align-items:center"><input id="torch" type="checkbox"> Torcia (se supportata)</label>
+      <input id="fileInput" type="file" accept="image/*" />
+    </div>
+
+    <h4>Risultato</h4>
+    <div id="result">Nessun QR rilevato</div>
+  </div>
+
+  <!-- Libreria QrScanner (usa CDN) -->
+  <script type="module">
+    import QrScanner from 'https://unpkg.com/qr-scanner@1.4.2/qr-scanner.min.js';
+    // Indica il path al worker (CDN)
+    QrScanner.WORKER_PATH = 'https://unpkg.com/qr-scanner@1.4.2/qr-scanner-worker.min.js';
+
+    const video = document.getElementById('video');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const resultEl = document.getElementById('result');
+    const cameraSelect = document.getElementById('cameraSelect');
+    const flipBtn = document.getElementById('flipBtn');
+    const torchCheckbox = document.getElementById('torch');
+    const fileInput = document.getElementById('fileInput');
+
+    let qrScanner = null;
+    let currentDeviceId = null;
+    let devices = [];
+
+    async function enumerateCameras(){
+      try{
+        const cams = await QrScanner.listCameras(true); // returns array of {id,label}
+        devices = cams;
+        cameraSelect.innerHTML = '';
+        cams.forEach(c=>{
+          const opt = document.createElement('option');
+          opt.value = c.id;
+          opt.textContent = c.label || c.id;
+          cameraSelect.appendChild(opt);
+        });
+      }catch(e){
+        console.warn('Impossibile enumerare le camere',e);
+      }
+    }
+
+    function onDecode(result){
+      resultEl.textContent = result || 'Nessun risultato';
+      // suono di notifica breve
+      try{new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YRAAAAAA').play().catch(()=>{});}catch(e){}
+    }
+
+    startBtn.addEventListener('click', async ()=>{
+      startBtn.disabled = true;
+      await enumerateCameras();
+      currentDeviceId = cameraSelect.value || (devices[0] && devices[0].id) || null;
+      if(qrScanner) qrScanner.stop();
+      qrScanner = new QrScanner(video, onDecode, {
+        preferredCamera: currentDeviceId || 'environment',
+        returnDetailedScanResult: false
+      });
+      try{
+        await qrScanner.start();
+        resultEl.textContent = 'In ascolto... inquadra un QR';
+      }catch(e){
+        console.error(e);
+        resultEl.textContent = 'Errore avvio camera: '+e.message;
+        startBtn.disabled = false;
+      }
+    });
+
+    stopBtn.addEventListener('click', ()=>{
+      if(qrScanner) qrScanner.stop();
+      startBtn.disabled = false;
+      resultEl.textContent = 'Camera fermata';
+    });
+
+    cameraSelect.addEventListener('change', async ()=>{
+      const id = cameraSelect.value;
+      if(!qrScanner) return;
+      await qrScanner.setCamera(id);
+      currentDeviceId = id;
+    });
+
+    flipBtn.addEventListener('click', async ()=>{
+      if(devices.length < 2){
+        // fallback: toggle between 'user' and 'environment'
+        if(!qrScanner) return;
+        const newPref = (qrScanner._preferredCamera === 'user') ? 'environment' : 'user';
+        await qrScanner.setCamera(newPref);
+        return;
+      }
+      const idx = devices.findIndex(d=>d.id===currentDeviceId);
+      const next = devices[(idx+1)%devices.length];
+      cameraSelect.value = next.id;
+      cameraSelect.dispatchEvent(new Event('change'));
+    });
+
+    // Torcia: usa ImageCapture if disponibile
+    torchCheckbox.addEventListener('change', async ()=>{
+      const on = torchCheckbox.checked;
+      if(!qrScanner) return;
+      const stream = qrScanner._activeCamera && qrScanner._activeCamera.stream ? qrScanner._activeCamera.stream : null;
+      if(!stream){
+        console.warn('Nessun stream per la torcia');
+        return;
+      }
+      const track = stream.getVideoTracks()[0];
+      if(!track) return;
+      const imageCapture = new ImageCapture(track);
+      try{
+        const cap = await imageCapture.getPhotoCapabilities();
+        if(cap.fillLightMode && cap.fillLightMode.includes('torch')){
+          await track.applyConstraints({advanced:[{torch:on}]});
+        }else{
+          console.warn('Torcia non supportata');
+        }
+      }catch(e){console.warn('Errore torcia',e)}
+    });
+
+    // Carica immagine e scansiona
+    fileInput.addEventListener('change', async (ev)=>{
+      const f = ev.target.files && ev.target.files[0];
+      if(!f) return;
+      resultEl.textContent = 'Scansione immagine...';
+      try{
+        const text = await QrScanner.scanImage(f, {returnDetailedScanResult:false});
+        onDecode(text);
+      }catch(e){
+        resultEl.textContent = 'Nessun QR nell\'immagine';
+      }
+    });
+
+    // Se la pagina è servita via file:// probabilmente i permessi non saranno concessi.
+    // Suggerimento: aprire su HTTPS (server) o su localhost.
+
+    // Prova a elencare le camere al caricamento (browers potrebbe richiedere permessi prima)
+    (async ()=>{ await enumerateCameras(); })();
+
+    // Prima di chiudere pagina, libera risorse
+    window.addEventListener('beforeunload', ()=>{ if(qrScanner) qrScanner.stop(); });
+  </script>
+</body>
+</html>
