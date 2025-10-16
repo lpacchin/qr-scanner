@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>QR Scanner — versione robusta</title>
+  <title>QR Scanner — fallback frame-scan (iPhone friendly)</title>
   <style>
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;display:flex;flex-direction:column;align-items:center;gap:12px;padding:18px;background:#f6f7fb;color:#111}
     .card{max-width:900px;width:100%;background:white;padding:12px;border-radius:10px;box-shadow:0 6px 18px rgba(20,30,60,0.08)}
@@ -16,13 +16,13 @@
     .hidden{display:none}
     .actions{display:flex;gap:8px;margin-top:8px}
     small.note{color:#666}
-    .log{font-size:12px;color:#666;margin-top:8px;max-height:120px;overflow:auto;background:#fff;padding:8px;border-radius:6px;border:1px solid #eee}
+    .log{font-size:12px;color:#666;margin-top:8px;max-height:160px;overflow:auto;background:#fff;padding:8px;border-radius:6px;border:1px solid #eee}
   </style>
 </head>
 <body>
   <div class="card">
-    <h2>QR Scanner — versione robusta</h2>
-    <p>Risolve problemi di iOS/Safari/macOS: richiede prima i permessi, ricrea il decoder al cambio camera e non riavvia la scansione automaticamente.</p>
+    <h2>QR Scanner — versione con fallback</h2>
+    <p>Se Safari/iPhone non decodifica con il worker normale, questo fallback cattura fotogrammi dal video e prova a decodificarli con <code>QrScanner.scanImage()</code>. Provalo su HTTPS in Safari.</p>
 
     <div>
       <video id="video" muted playsinline></video>
@@ -46,7 +46,7 @@
       <button id="continueBtn">Continua scansione</button>
     </div>
 
-    <p><small class="note">Test: apri direttamente in Safari (non come webapp sulla home) e concedi la fotocamera quando richiesto.</small></p>
+    <p><small class="note">Consiglio: apri la pagina direttamente in Safari (no WebApp) e apri la console remota per leggere i log.</small></p>
     <div class="log" id="log"></div>
   </div>
 
@@ -55,7 +55,7 @@
     QrScanner.WORKER_PATH = 'https://unpkg.com/qr-scanner@1.4.2/qr-scanner-worker.min.js';
 
     const logEl = document.getElementById('log');
-    function log(...args){ console.log(...args); logEl.innerText += args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ') + '\\n'; logEl.scrollTop = logEl.scrollHeight; }
+    function log(...args){ console.log(...args); logEl.innerText += args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ') + '\n'; logEl.scrollTop = logEl.scrollHeight; }
 
     const video = document.getElementById('video');
     const startBtn = document.getElementById('startBtn');
@@ -76,6 +76,8 @@
     let currentDeviceId = null;
     let lastResult = null;
     let currentStream = null;
+    let frameScanInterval = null;
+    let frameCanvas = null;
 
     function pickRearCamera(cams){
       if(!cams || cams.length===0) return null;
@@ -87,26 +89,17 @@
 
     function playVideoElement(){ return video.play ? video.play().catch(e => { log('video.play error', e); }) : Promise.resolve(); }
 
-    // get permissions first if needed - useful su macOS/Safari per ottenere label delle devices
     async function ensurePermissions(){
       try{
         if(!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
         const devicesNow = await navigator.mediaDevices.enumerateDevices();
-        // se le label sono vuote, richiediamo un getUserMedia temporaneo per far comparire la richiesta permessi
         const labelsPresent = devicesNow.some(d => d.kind === 'videoinput' && d.label);
         if(!labelsPresent){
-          log('Labels vuote: richiedo permessi temporanei per permettere enumerateDevices con label.');
+          log('Labels vuote: richiedo permessi temporanei.');
           const tmpStream = await navigator.mediaDevices.getUserMedia({ video: true }).catch(e => { log('getUserMedia temporaneo fallito', e); return null; });
-          if(tmpStream){
-            tmpStream.getTracks().forEach(t => t.stop());
-            log('Permesso concesso e stream temporaneo stoppato.');
-          }else{
-            log('Permesso non concesso o errore.');
-          }
+          if(tmpStream){ tmpStream.getTracks().forEach(t => t.stop()); log('Permesso concesso (stream temporaneo stoppato).'); } else { log('Permesso non concesso.'); }
         }
-      }catch(e){
-        log('ensurePermissions error', e);
-      }
+      }catch(e){ log('ensurePermissions error', e); }
     }
 
     async function enumerateCameras(){
@@ -115,64 +108,73 @@
         const cams = await QrScanner.listCameras(true);
         devices = cams || [];
         cameraSelect.innerHTML = '';
-        devices.forEach(c => {
-          const opt = document.createElement('option');
-          opt.value = c.id;
-          opt.textContent = c.label || c.id;
-          cameraSelect.appendChild(opt);
-        });
+        devices.forEach(c => { const opt = document.createElement('option'); opt.value = c.id; opt.textContent = c.label || c.id; cameraSelect.appendChild(opt); });
         const rear = pickRearCamera(devices);
         if(rear){ cameraSelect.value = rear.id; currentDeviceId = rear.id; }
         else if(devices[0]){ cameraSelect.value = devices[0].id; currentDeviceId = devices[0].id; }
         log('Devices enumerated', devices);
-      }catch(e){
-        log('enumerateCameras error', e);
-      }
+      }catch(e){ log('enumerateCameras error', e); }
     }
 
-    // destroy existing scanner (stop + destroy internals)
     async function destroyScanner(){
-      if(qrScanner){
-        try{ await qrScanner.stop(); }catch(e){ log('stop error', e); }
-        try{ qrScanner.destroy(); }catch(e){ /* ignore */ }
-        qrScanner = null;
-      }
+      if(frameScanInterval){ clearInterval(frameScanInterval); frameScanInterval = null; }
+      if(qrScanner){ try{ await qrScanner.stop(); }catch(e){ log('stop error', e); } try{ qrScanner.destroy(); }catch(e){} qrScanner = null; }
     }
 
     async function stopStream(){
-      if(currentStream){
-        try{ currentStream.getTracks().forEach(t => t.stop()); }catch(e){ /* ignore */ }
-        currentStream = null;
-        video.srcObject = null;
-      }
+      if(currentStream){ try{ currentStream.getTracks().forEach(t => t.stop()); }catch(e){} currentStream = null; video.srcObject = null; }
+      if(frameCanvas){ frameCanvas = null; }
     }
 
-    // core: switchToDevice crea nuovo stream, distrugge/ricrea scanner per garantire overlay
+    // Fallback: cattura frame dal video e tenta scanImage
+    function startFrameFallback(){
+      if(!video || !video.videoWidth) return;
+      if(frameScanInterval) clearInterval(frameScanInterval);
+      frameCanvas = document.createElement('canvas');
+      const w = Math.min(1024, video.videoWidth);
+      const h = Math.min(768, video.videoHeight * (w / video.videoWidth));
+      frameCanvas.width = w;
+      frameCanvas.height = Math.round(h);
+      const ctx = frameCanvas.getContext('2d');
+      log('Frame fallback attivato', w, frameCanvas.height);
+      frameScanInterval = setInterval(async () => {
+        try{
+          ctx.drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
+          // prova a decodificare direttamente dal canvas
+          const text = await QrScanner.scanImage(frameCanvas, { returnDetailedScanResult: false }).catch(e => null);
+          if(text){
+            log('Fallback decoded', text);
+            await onDecode(text);
+          }
+        }catch(e){ /* ignora */ }
+      }, 600); // ogni 600ms
+    }
+
     async function switchToDevice(deviceId){
       try{
         log('switchToDevice', deviceId);
         await destroyScanner();
         await stopStream();
 
-        const constraints = deviceId ? { video: { deviceId: { exact: deviceId } } } : { video: { facingMode: 'environment' } };
+        // richiedi caratteristiche più alte per migliorare decode (se il device lo supporta)
+        const constraints = deviceId ? { video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } } : { video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } };
         currentStream = await navigator.mediaDevices.getUserMedia(constraints);
         video.srcObject = currentStream;
         await playVideoElement();
 
-        // crea nuova istanza AFTER attaching stream — così QrScanner crea overlay correttamente
-        qrScanner = new QrScanner(video, onDecode, {
-          highlightScanRegion: true,
-          maxScansPerSecond: 10
-        });
-
-        // start scanning
+        // crea qrScanner **dopo** aver attaccato lo stream per garantire overlay
+        qrScanner = new QrScanner(video, onDecode, { highlightScanRegion: true, maxScansPerSecond: 10 });
         await qrScanner.start();
         currentDeviceId = deviceId || null;
         log('Scanner avviato su', currentDeviceId);
-      }catch(err){
-        log('switchToDevice error', err);
-        resultDisplay.textContent = 'Errore cambio camera: ' + (err && err.message ? err.message : err);
-      }
+
+        // avvia fallback frame scanner in background (solo se non decodifica)
+        // startFrameFallback(); // non attiviamo subito per evitare duplicati; useremo un timeout per avviarlo se non c'è decode
+        // se dopo 1.2s non abbiamo un risultato, avvia fallback
+        setTimeout(() => {
+          if(!lastResult && currentStream) startFrameFallback();
+        }, 1200);
+      }catch(err){ log('switchToDevice error', err); resultDisplay.textContent = 'Errore cambio camera: ' + (err && err.message ? err.message : err); }
     }
 
     function isValidUrl(str){ try{ new URL(str); return true; }catch(e){ return false; } }
@@ -180,7 +182,6 @@
     async function onDecode(result){
       if(!result) return;
       log('Decoded:', result);
-      // evita duplicati
       if(result === lastResult) return;
       lastResult = result;
 
@@ -189,14 +190,13 @@
       resultInput.value = result;
       actions.classList.remove('hidden');
 
-      // copia automatica se possibile (utile), ma non causa riavvio
       try{ if(navigator.clipboard) await navigator.clipboard.writeText(result); log('Copied to clipboard'); }catch(e){ log('Copy failed', e); }
-
       if(navigator.vibrate) navigator.vibrate(120);
       try{ new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YRAAAAAA').play().catch(()=>{}); }catch(e){}
 
-      // fermiamo lo scanner e NON lo riavviamo in automatico
+      // ferma tutto e pulisci fallback
       await destroyScanner();
+      await stopStream();
 
       openBtn.disabled = !isValidUrl(result);
       openBtn.onclick = ()=>{ window.open(result, '_blank'); };
@@ -205,18 +205,14 @@
         actions.classList.add('hidden');
         resultDisplay.textContent = 'Riavvio scansione...';
         lastResult = null;
-        // se abbiamo ancora lo stream, ricreiamo scanner
-        if(currentStream){
-          qrScanner = new QrScanner(video, onDecode, { highlightScanRegion: true, maxScansPerSecond: 10 });
-          try{ await qrScanner.start(); resultDisplay.textContent = 'In ascolto...'; }catch(e){ log('riavvio scanner error', e); resultDisplay.textContent = 'Errore riavvio: '+(e&&e.message?e.message:e); }
-        } else {
-          // altrimenti chiedi di premere Avvia
-          resultDisplay.textContent = 'Premi Avvia camera';
-        }
+        // dopo aver mostrato il risultato, riavvia lo stream sulla stessa device se possibile
+        try{
+          await switchToDevice(currentDeviceId || cameraSelect.value || null);
+        }catch(e){ log('Errore riavvio dopo continue', e); }
       };
     }
 
-    // start button
+    // event handlers
     startBtn.addEventListener('click', async () => {
       startBtn.disabled = true;
       await enumerateCameras();
@@ -225,50 +221,16 @@
       resultDisplay.textContent = 'In ascolto... inquadra un QR';
     });
 
-    stopBtn.addEventListener('click', async () => {
-      await destroyScanner();
-      await stopStream();
-      startBtn.disabled = false;
-      resultDisplay.textContent = 'Camera fermata';
-    });
+    stopBtn.addEventListener('click', async () => { await destroyScanner(); await stopStream(); startBtn.disabled = false; resultDisplay.textContent = 'Camera fermata'; });
 
-    cameraSelect.addEventListener('change', async () => {
-      const id = cameraSelect.value;
-      if(!id) return;
-      await switchToDevice(id);
-    });
+    cameraSelect.addEventListener('change', async () => { const id = cameraSelect.value; if(!id) return; await switchToDevice(id); });
+    flipBtn.addEventListener('click', async () => { if(!devices || devices.length===0) return; const idx = devices.findIndex(d=>d.id===currentDeviceId); const next = devices[(idx+1)%devices.length] || devices[0]; cameraSelect.value = next.id; await switchToDevice(next.id); });
 
-    flipBtn.addEventListener('click', async () => {
-      if(!devices || devices.length === 0) return;
-      const idx = devices.findIndex(d => d.id === currentDeviceId);
-      const next = devices[(idx + 1) % devices.length] || devices[0];
-      cameraSelect.value = next.id;
-      await switchToDevice(next.id);
-    });
+    torchCheckbox.addEventListener('change', async () => { const on = torchCheckbox.checked; if(!currentStream) return; const track = currentStream.getVideoTracks()[0]; if(!track) return; try{ await track.applyConstraints({ advanced: [{ torch: on }] }); }catch(e){ log('torch not supported', e); } });
 
-    torchCheckbox.addEventListener('change', async () => {
-      const on = torchCheckbox.checked;
-      if(!currentStream) return;
-      const track = currentStream.getVideoTracks()[0];
-      if(!track) return;
-      try{ await track.applyConstraints({ advanced: [{ torch: on }] }); }catch(e){ log('torch not supported', e); }
-    });
+    fileInput.addEventListener('change', async (ev) => { const f = ev.target.files && ev.target.files[0]; if(!f) return; resultDisplay.textContent = 'Scansione immagine...'; try{ const text = await QrScanner.scanImage(f, { returnDetailedScanResult: false }); onDecode(text); }catch(e){ resultDisplay.textContent = "Nessun QR nell'immagine"; } });
 
-    fileInput.addEventListener('change', async (ev) => {
-      const f = ev.target.files && ev.target.files[0];
-      if(!f) return;
-      resultDisplay.textContent = 'Scansione immagine...';
-      try{
-        const text = await QrScanner.scanImage(f, { returnDetailedScanResult: false });
-        onDecode(text);
-      }catch(e){
-        resultDisplay.textContent = "Nessun QR nell'immagine";
-      }
-    });
-
-    // iniziale
     (async ()=>{ await enumerateCameras(); })();
-
     window.addEventListener('beforeunload', async ()=>{ await destroyScanner(); await stopStream(); });
   </script>
 </body>
