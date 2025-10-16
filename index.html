@@ -11,7 +11,8 @@
     .controls{display:flex;gap:8px;flex-wrap:wrap}
     button{padding:8px 12px;border-radius:8px;border:1px solid #ddd;background:#fff;cursor:pointer}
     button.primary{background:#0b69ff;color:white;border-color:transparent}
-    #result{word-break:break-all;padding:8px;background:#f3f6ff;border-radius:6px}
+    #resultDisplay{word-break:break-all;padding:8px;background:#f3f6ff;border-radius:6px}
+    input#resultInput{width:100%;padding:8px;border-radius:6px;border:1px solid #ccc}
     .hidden{display:none}
     .actions{display:flex;gap:8px;margin-top:8px}
     small.note{color:#666}
@@ -20,7 +21,7 @@
 <body>
   <div class="card">
     <h2>Scanner QR con fotocamera</h2>
-    <p>Pagina ottimizzata per iPhone/Safari: forza lo switch su camera posteriore e riavvia correttamente il decoder. Funziona su <code>HTTPS</code> o <code>localhost</code>.</p>
+    <p>Ottimizzata per iPhone/Safari: ora la scansione si mette in pausa al primo risultato e non riparte automaticamente. Usa il campo sotto per vedere/modificare il contenuto letto.</p>
 
     <div>
       <video id="video" muted playsinline></video>
@@ -36,14 +37,15 @@
     </div>
 
     <h4>Risultato</h4>
-    <div id="result">Nessun QR rilevato</div>
+    <div id="resultDisplay">Nessun QR rilevato</div>
+    <input id="resultInput" placeholder="Il contenuto del QR apparirà qui" readonly />
     <div class="actions hidden" id="actions">
-      <button id="openBtn">Apri</button>
+      <button id="openBtn">Apri (se URL)</button>
       <button id="copyBtn">Copia</button>
       <button id="continueBtn">Continua scansione</button>
     </div>
 
-    <p><small class="note">Consiglio: apri questa pagina direttamente in Safari (non come webapp aggiunta alla Home) se riscontri problemi di permessi.</small></p>
+    <p><small class="note">Se vuoi che la scansione riparta automaticamente dopo aver copiato, dimmelo e la imposto come opzione.</small></p>
   </div>
 
   <!-- Libreria QrScanner (CDN) -->
@@ -54,7 +56,8 @@
     const video = document.getElementById('video');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
-    const resultEl = document.getElementById('result');
+    const resultDisplay = document.getElementById('resultDisplay');
+    const resultInput = document.getElementById('resultInput');
     const cameraSelect = document.getElementById('cameraSelect');
     const flipBtn = document.getElementById('flipBtn');
     const torchCheckbox = document.getElementById('torch');
@@ -69,94 +72,48 @@
     let currentDeviceId = null;
     let lastResult = null;
 
-    // pick a rear camera by label if possible
     function pickRearCamera(cams){
       if(!cams || cams.length === 0) return null;
       const re = /back|rear|environment|posteriore|posteri[oì]re|rear camera|back camera/i;
-      for(const c of cams){
-        if(c.label && re.test(c.label)) return c;
-      }
+      for(const c of cams){ if(c.label && re.test(c.label)) return c; }
       if(cams.length > 1) return cams[1];
       return cams[0];
     }
 
-    // play video element safely
-    function playVideoElement(){
-      return video.play ? video.play().catch(e => { console.warn('video.play error', e); }) : Promise.resolve();
-    }
+    function playVideoElement(){ return video.play ? video.play().catch(e => { console.warn('video.play error', e); }) : Promise.resolve(); }
 
-    // enumerate cameras and populate select
     async function enumerateCameras(){
       try{
         const cams = await QrScanner.listCameras(true);
         devices = cams || [];
         cameraSelect.innerHTML = '';
-        devices.forEach(c => {
-          const opt = document.createElement('option');
-          opt.value = c.id;
-          opt.textContent = c.label || c.id;
-          cameraSelect.appendChild(opt);
-        });
+        devices.forEach(c => { const opt = document.createElement('option'); opt.value = c.id; opt.textContent = c.label || c.id; cameraSelect.appendChild(opt); });
         const rear = pickRearCamera(devices);
-        if(rear){
-          cameraSelect.value = rear.id;
-          currentDeviceId = rear.id;
-        }else if(devices[0]){
-          cameraSelect.value = devices[0].id;
-          currentDeviceId = devices[0].id;
-        }
-      }catch(e){
-        console.warn('Impossibile enumerare le camere', e);
-      }
+        if(rear){ cameraSelect.value = rear.id; currentDeviceId = rear.id; }
+        else if(devices[0]){ cameraSelect.value = devices[0].id; currentDeviceId = devices[0].id; }
+      }catch(e){ console.warn('Impossibile enumerare le camere', e); }
     }
 
-    // switch to device using getUserMedia + explicit stream attach (works better on iOS)
     async function switchToDevice(deviceId){
       try{
         console.log('switchToDevice', deviceId);
-        // stop scanner
-        if(qrScanner){
-          try{ await qrScanner.stop(); }catch(e){ console.warn('qr stop', e); }
-        }
-
-        // stop previous tracks
-        if(video.srcObject){
-          try{
-            video.srcObject.getTracks().forEach(t => t.stop());
-          }catch(e){ /* ignore */ }
-          video.srcObject = null;
-        }
-
-        // build constraints - deviceId exact if provided, otherwise prefer environment
+        if(qrScanner){ try{ await qrScanner.stop(); }catch(e){ console.warn('qr stop', e); } }
+        if(video.srcObject){ try{ video.srcObject.getTracks().forEach(t => t.stop()); }catch(e){} video.srcObject = null; }
         const constraints = deviceId ? { video: { deviceId: { exact: deviceId } } } : { video: { facingMode: 'environment' } };
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
-
-        // attach stream and ensure playing
         video.srcObject = stream;
         await playVideoElement();
-
-        // create or reuse qrScanner tied to the <video> element
         if(!qrScanner){
-          qrScanner = new QrScanner(video, onDecode, {
-            highlightScanRegion: true,
-            maxScansPerSecond: 10
-          });
+          qrScanner = new QrScanner(video, onDecode, { highlightScanRegion: true, maxScansPerSecond: 10 });
         }
-
-        // ensure scanner uses the new video (QrScanner reads from the element)
         // start scanning
         await qrScanner.start();
         currentDeviceId = deviceId || null;
         console.log('Scanner avviato su', currentDeviceId);
-      }catch(err){
-        console.error('switchToDevice error', err);
-        resultEl.textContent = 'Errore cambio camera: ' + (err && err.message ? err.message : err);
-      }
+      }catch(err){ console.error('switchToDevice error', err); resultDisplay.textContent = 'Errore cambio camera: ' + (err && err.message ? err.message : err); }
     }
 
-    function isValidUrl(str){
-      try{ new URL(str); return true; }catch(e){ return false; }
-    }
+    function isValidUrl(str){ try{ new URL(str); return true; }catch(e){ return false; } }
 
     async function onDecode(result){
       if(!result) return;
@@ -164,66 +121,44 @@
       if(result === lastResult) return;
       lastResult = result;
 
-      resultEl.textContent = result;
+      // mostra il risultato e popola il campo input (readonly)
+      resultDisplay.textContent = result;
+      resultInput.value = result;
       actions.classList.remove('hidden');
 
-      // try copy to clipboard silently
+      // copia automatica se possibile (ma non necessaria)
       try{ if(navigator.clipboard) await navigator.clipboard.writeText(result); console.log('Copied to clipboard'); }catch(e){ console.warn('Copy failed', e); }
 
-      // feedback: vibrate + sound
+      // feedback
       if(navigator.vibrate) navigator.vibrate(120);
       try{ new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YRAAAAAA').play().catch(()=>{}); }catch(e){}
 
-      // stop scanner temporarily to avoid duplicates
-      if(qrScanner){
-        try{ await qrScanner.stop(); }catch(e){ console.warn('stop error', e); }
-      }
+      // stop scanner e NON riavviarlo automaticamente: l'utente decide quando continuare
+      if(qrScanner){ try{ await qrScanner.stop(); }catch(e){ console.warn('stop error', e); } }
 
       openBtn.disabled = !isValidUrl(result);
       openBtn.onclick = ()=>{ window.open(result, '_blank'); };
-      copyBtn.onclick = async ()=>{ try{ await navigator.clipboard.writeText(result); resultEl.textContent = 'Copiato negli appunti: '+result; }catch(e){ resultEl.textContent = 'Copia fallita: '+e.message; } };
-      continueBtn.onclick = async ()=>{
-        actions.classList.add('hidden');
-        resultEl.textContent = 'Continua scansione...';
-        try{ await qrScanner.start(); lastResult = null; }catch(e){ console.warn('start error', e); resultEl.textContent = 'Errore riavvio camera: '+e.message; }
-      };
-
-      // auto restart after short delay (comment out if not desired)
-      setTimeout(async ()=>{
-        if(qrScanner){
-          try{ await qrScanner.start(); lastResult = null; actions.classList.add('hidden'); resultEl.textContent = 'In ascolto... inquadra un QR'; }catch(e){ console.warn('start error', e); }
-        }
-      }, 2000);
+      copyBtn.onclick = async ()=>{ try{ await navigator.clipboard.writeText(result); resultDisplay.textContent = 'Copiato negli appunti: '+result; }catch(e){ resultDisplay.textContent = 'Copia fallita: '+e.message; } };
+      continueBtn.onclick = async ()=>{ actions.classList.add('hidden'); resultDisplay.textContent = 'Continua scansione...'; try{ await qrScanner.start(); lastResult = null; }catch(e){ console.warn('start error', e); resultDisplay.textContent = 'Errore riavvio camera: '+e.message; } };
     }
 
-    // Start button: enumerate and switch to preferred rear device
     startBtn.addEventListener('click', async () => {
       startBtn.disabled = true;
       await enumerateCameras();
       const preferred = currentDeviceId || cameraSelect.value || null;
       await switchToDevice(preferred);
-      resultEl.textContent = 'In ascolto... inquadra un QR';
+      resultDisplay.textContent = 'In ascolto... inquadra un QR';
     });
 
     stopBtn.addEventListener('click', async () => {
       if(qrScanner) try{ await qrScanner.stop(); }catch(e){ console.warn(e); }
       startBtn.disabled = false;
-      // stop video tracks
-      if(video.srcObject){
-        try{ video.srcObject.getTracks().forEach(t => t.stop()); }catch(e){}
-        video.srcObject = null;
-      }
-      resultEl.textContent = 'Camera fermata';
+      if(video.srcObject){ try{ video.srcObject.getTracks().forEach(t => t.stop()); }catch(e){} video.srcObject = null; }
+      resultDisplay.textContent = 'Camera fermata';
     });
 
-    // change camera via select -> call switchToDevice with deviceId
-    cameraSelect.addEventListener('change', async () => {
-      const id = cameraSelect.value;
-      if(!id) return;
-      await switchToDevice(id);
-    });
+    cameraSelect.addEventListener('change', async () => { const id = cameraSelect.value; if(!id) return; await switchToDevice(id); });
 
-    // flip button: rotate through devices
     flipBtn.addEventListener('click', async () => {
       if(!devices || devices.length === 0) return;
       const idx = devices.findIndex(d => d.id === currentDeviceId);
@@ -232,7 +167,6 @@
       await switchToDevice(next.id);
     });
 
-    // torch (if supported)
     torchCheckbox.addEventListener('change', async () => {
       const on = torchCheckbox.checked;
       if(!video.srcObject) return;
@@ -241,23 +175,11 @@
       try{ await track.applyConstraints({ advanced: [{ torch: on }] }); }catch(e){ console.warn('torch not supported', e); }
     });
 
-    // scan from image file
     fileInput.addEventListener('change', async (ev) => {
-      const f = ev.target.files && ev.target.files[0];
-      if(!f) return;
-      resultEl.textContent = 'Scansione immagine...';
-      try{
-        const text = await QrScanner.scanImage(f, { returnDetailedScanResult: false });
-        onDecode(text);
-      }catch(e){
-        resultEl.textContent = "Nessun QR nell'immagine";
-      }
+      const f = ev.target.files && ev.target.files[0]; if(!f) return; resultDisplay.textContent = 'Scansione immagine...'; try{ const text = await QrScanner.scanImage(f, { returnDetailedScanResult: false }); onDecode(text); }catch(e){ resultDisplay.textContent = "Nessun QR nell'immagine"; }
     });
 
-    // initial enumerate (might be empty labels until permissions granted)
     (async ()=>{ await enumerateCameras(); })();
-
-    // cleanup on unload
     window.addEventListener('beforeunload', ()=>{ if(qrScanner) qrScanner.stop(); if(video.srcObject) try{ video.srcObject.getTracks().forEach(t=>t.stop()); }catch(e){} });
   </script>
 </body>
