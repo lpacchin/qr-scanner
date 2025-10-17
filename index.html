@@ -1,230 +1,333 @@
-<!doctype html>
-<html lang="it">
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>QR Scanner — fallback frame-scan (iPhone friendly) — FIXED</title>
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;display:flex;flex-direction:column;align-items:center;gap:12px;padding:18px;background:#f6f7fb;color:#111}
-    .card{max-width:900px;width:100%;background:white;padding:12px;border-radius:10px;box-shadow:0 6px 18px rgba(20,30,60,0.08)}
-    video{width:100%;height:auto;border-radius:8px;background:#000}
-    .controls{display:flex;gap:8px;flex-wrap:wrap}
-    button{padding:8px 12px;border-radius:8px;border:1px solid #ddd;background:#fff;cursor:pointer}
-    button.primary{background:#0b69ff;color:white;border-color:transparent}
-    #resultDisplay{word-break:break-all;padding:8px;background:#f3f6ff;border-radius:6px}
-    input#resultInput{width:100%;padding:8px;border-radius:6px;border:1px solid #ccc}
-    .hidden{display:none}
-    .actions{display:flex;gap:8px;margin-top:8px}
-    small.note{color:#666}
-    .log{font-size:12px;color:#666;margin-top:8px;max-height:160px;overflow:auto;background:#fff;padding:8px;border-radius:6px;border:1px solid #eee}
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta http-equiv="Content-Style-Type" content="text/css">
+  <title></title>
+  <meta name="Generator" content="Cocoa HTML Writer">
+  <meta name="CocoaVersion" content="2685.1">
+  <style type="text/css">
+    body {background-color: #f4f5fa}
+    span.s1 {font-kerning: none}
   </style>
 </head>
 <body>
-  <div class="card">
-    <h2>QR Scanner — versione con fallback (FIX)</h2>
-    <p>Fix per iPhone/Safari: ora gestisce correttamente i risultati dettagliati del decoder e scrive sempre il testo nel campo.</p>
-
-    <div>
-      <video id="video" muted playsinline></video>
-    </div>
-
-    <div class="controls">
-      <button id="startBtn" class="primary">Avvia camera</button>
-      <button id="stopBtn">Ferma</button>
-      <select id="cameraSelect" aria-label="Seleziona fotocamera"></select>
-      <button id="flipBtn">Cambia fotocamera</button>
-      <label style="display:flex;gap:6px;align-items:center"><input id="torch" type="checkbox"> Torcia (se supportata)</label>
-      <input id="fileInput" type="file" accept="image/*" />
-    </div>
-
-    <h4>Risultato</h4>
-    <div id="resultDisplay">Nessun QR rilevato</div>
-    <input id="resultInput" placeholder="Il contenuto del QR apparirà qui" readonly />
-    <div class="actions hidden" id="actions">
-      <button id="openBtn">Apri (se URL)</button>
-      <button id="copyBtn">Copia</button>
-      <button id="continueBtn">Continua scansione</button>
-    </div>
-
-    <p><small class="note">Consiglio: apri la pagina direttamente in Safari (no WebApp) e apri la console remota per leggere i log.</small></p>
-    <div class="log" id="log"></div>
-  </div>
-
-  <script type="module">
-    import QrScanner from 'https://unpkg.com/qr-scanner@1.4.2/qr-scanner.min.js';
-    QrScanner.WORKER_PATH = 'https://unpkg.com/qr-scanner@1.4.2/qr-scanner-worker.min.js';
-
-    const logEl = document.getElementById('log');
-    function log(...args){ console.log(...args); logEl.innerText += args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ') + '\n'; logEl.scrollTop = logEl.scrollHeight; }
-
-    const video = document.getElementById('video');
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const resultDisplay = document.getElementById('resultDisplay');
-    const resultInput = document.getElementById('resultInput');
-    const cameraSelect = document.getElementById('cameraSelect');
-    const flipBtn = document.getElementById('flipBtn');
-    const torchCheckbox = document.getElementById('torch');
-    const fileInput = document.getElementById('fileInput');
-    const actions = document.getElementById('actions');
-    const openBtn = document.getElementById('openBtn');
-    const copyBtn = document.getElementById('copyBtn');
-    const continueBtn = document.getElementById('continueBtn');
-
-    let qrScanner = null;
-    let devices = [];
-    let currentDeviceId = null;
-    let lastResult = null;
-    let currentStream = null;
-    let frameScanInterval = null;
-    let frameCanvas = null;
-
-    function pickRearCamera(cams){
-      if(!cams || cams.length===0) return null;
-      const re = /back|rear|environment|posteriore|posteri[oì]re|rear camera|back camera/i;
-      for(const c of cams){ if(c.label && re.test(c.label)) return c; }
-      if(cams.length>1) return cams[1];
-      return cams[0];
-    }
-
-    function playVideoElement(){ return video.play ? video.play().catch(e => { log('video.play error', e); }) : Promise.resolve(); }
-
-    async function enumerateCameras(){
-      try{
-        const cams = await QrScanner.listCameras(true);
-        devices = cams || [];
-        cameraSelect.innerHTML = '';
-        devices.forEach(c => { const opt = document.createElement('option'); opt.value = c.id; opt.textContent = c.label || c.id; cameraSelect.appendChild(opt); });
-        const rear = pickRearCamera(devices);
-        if(rear){ cameraSelect.value = rear.id; currentDeviceId = rear.id; }
-        else if(devices[0]){ cameraSelect.value = devices[0].id; currentDeviceId = devices[0].id; }
-        log('Devices enumerated', devices);
-      }catch(e){ log('enumerateCameras error', e); }
-    }
-
-    async function destroyScanner(){
-      if(frameScanInterval){ clearInterval(frameScanInterval); frameScanInterval = null; }
-      if(qrScanner){ try{ await qrScanner.stop(); }catch(e){ log('stop error', e); } try{ qrScanner.destroy(); }catch(e){} qrScanner = null; }
-    }
-
-    async function stopStream(){
-      if(currentStream){ try{ currentStream.getTracks().forEach(t => t.stop()); }catch(e){} currentStream = null; video.srcObject = null; }
-      if(frameCanvas){ frameCanvas = null; }
-    }
-
-    function startFrameFallback(){
-      if(!video || !video.videoWidth) return;
-      if(frameScanInterval) clearInterval(frameScanInterval);
-      frameCanvas = document.createElement('canvas');
-      const w = Math.min(1280, video.videoWidth);
-      const h = Math.round(video.videoHeight * (w / video.videoWidth));
-      frameCanvas.width = w;
-      frameCanvas.height = h;
-      const ctx = frameCanvas.getContext('2d');
-      log('Frame fallback attivato', w, frameCanvas.height);
-      frameScanInterval = setInterval(async () => {
-        try{
-          ctx.drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
-          const res = await QrScanner.scanImage(frameCanvas, { returnDetailedScanResult: true }).catch(()=>null);
-          if(res){
-            // res può essere un oggetto dettagliato; estraiamo il testo effettivo
-            const text = (typeof res === 'string') ? res : (res.data || res.text || res.rawValue || JSON.stringify(res));
-            log('Fallback decoded', res);
-            await onDecode(text);
-          }
-        }catch(e){ /* ignora */ }
-      }, 600);
-    }
-
-    async function switchToDevice(deviceId){
-      try{
-        log('switchToDevice', deviceId);
-        await destroyScanner();
-        await stopStream();
-
-        const constraints = deviceId ? { video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } } : { video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } };
-        currentStream = await navigator.mediaDevices.getUserMedia(constraints);
-        video.srcObject = currentStream;
-        await playVideoElement();
-
-        qrScanner = new QrScanner(video, async (r) => {
-          // QrScanner internamente può fornire stringa o oggetto; normalizziamo
-          const text = (typeof r === 'string') ? r : (r && (r.data || r.text || r.rawValue)) || null;
-          if(text) await onDecode(text);
-          else log('Scanner returned non-text result', r);
-        }, { highlightScanRegion: true, maxScansPerSecond: 10 });
-
-        await qrScanner.start();
-        currentDeviceId = deviceId || null;
-        log('Scanner avviato su', currentDeviceId);
-
-        setTimeout(() => { if(!lastResult && currentStream) startFrameFallback(); }, 1200);
-      }catch(err){ log('switchToDevice error', err); resultDisplay.textContent = 'Errore cambio camera: ' + (err && err.message ? err.message : err); }
-    }
-
-    function isValidUrl(str){ try{ new URL(str); return true; }catch(e){ return false; } }
-
-    async function onDecode(result){
-      if(!result) return;
-      log('Decoded (normalized):', result);
-      if(result === lastResult) return;
-      lastResult = result;
-
-      // mostra e scrive campo (usiamo stringa pulita)
-      const text = String(result);
-      resultDisplay.textContent = text;
-      try{ resultInput.value = text; }catch(e){ log('Impossibile scrivere input', e); }
-      actions.classList.remove('hidden');
-
-      // copia automatica (ora usiamo stringa)
-      try{ if(navigator.clipboard) await navigator.clipboard.writeText(text); log('Copied to clipboard'); }catch(e){ log('Copy failed', e); }
-
-      if(navigator.vibrate) navigator.vibrate(120);
-      try{ new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YRAAAAAA').play().catch(()=>{}); }catch(e){}
-
-      // fermiamo scanner e stream
-      await destroyScanner();
-      await stopStream();
-
-      openBtn.disabled = !isValidUrl(text);
-      openBtn.onclick = ()=>{ window.open(text, '_blank'); };
-      copyBtn.onclick = async ()=>{ try{ await navigator.clipboard.writeText(text); resultDisplay.textContent = 'Copiato: '+text; }catch(e){ resultDisplay.textContent = 'Copia fallita: '+e.message; } };
-      continueBtn.onclick = async ()=>{
-        actions.classList.add('hidden');
-        resultDisplay.textContent = 'Riavvio scansione...';
-        lastResult = null;
-        try{ await switchToDevice(currentDeviceId || cameraSelect.value || null); }catch(e){ log('Errore riavvio dopo continue', e); }
-      };
-    }
-
-    startBtn.addEventListener('click', async () => {
-      startBtn.disabled = true;
-      // richiesta permessi con user gesture
-      try{
-        const tmpStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }).catch(e=>{ log('getUserMedia init fallito', e); return null; });
-        if(tmpStream){ tmpStream.getTracks().forEach(t=>t.stop()); log('Permesso concesso (init).'); } else log('Permesso non concesso al primo tentativo.');
-      }catch(e){ log('getUserMedia init error', e); }
-
-      await enumerateCameras();
-      const preferred = currentDeviceId || cameraSelect.value || null;
-      await switchToDevice(preferred);
-      resultDisplay.textContent = 'In ascolto... inquadra un QR';
-    });
-
-    stopBtn.addEventListener('click', async () => { await destroyScanner(); await stopStream(); startBtn.disabled = false; resultDisplay.textContent = 'Camera fermata'; });
-
-    cameraSelect.addEventListener('change', async () => { const id = cameraSelect.value; if(!id) return; await switchToDevice(id); });
-
-    flipBtn.addEventListener('click', async () => { if(!devices || devices.length===0) return; const idx = devices.findIndex(d=>d.id===currentDeviceId); const next = devices[(idx+1)%devices.length] || devices[0]; cameraSelect.value = next.id; await switchToDevice(next.id); });
-
-    torchCheckbox.addEventListener('change', async () => { const on = torchCheckbox.checked; if(!currentStream) return; const track = currentStream.getVideoTracks()[0]; if(!track) return; try{ await track.applyConstraints({ advanced: [{ torch: on }] }); }catch(e){ log('torch not supported', e); } });
-
-    fileInput.addEventListener('change', async (ev) => { const f = ev.target.files && ev.target.files[0]; if(!f) return; resultDisplay.textContent = 'Scansione immagine...'; try{ const res = await QrScanner.scanImage(f, { returnDetailedScanResult: true }); const txt = (typeof res==='string')?res:(res&& (res.data||res.text||res.rawValue))||JSON.stringify(res); await onDecode(txt); }catch(e){ resultDisplay.textContent = "Nessun QR nell'immagine"; } });
-
-    // iniziale: non enumeriamo subito per evitare blocchi su Safari
-    // enumerateCameras() sarà chiamata solo dopo start (user gesture)
-
-    window.addEventListener('beforeunload', async () => { await destroyScanner(); await stopStream(); });
-  </script>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b>&lt;!doctype html&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b>&lt;html lang="it"&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b>&lt;head&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>&lt;meta charset="utf-8" /&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>&lt;meta name="viewport" content="width=device-width,initial-scale=1" /&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>&lt;title&gt;Scanner (QR + DataMatrix)&lt;/title&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>&lt;style&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;display:flex;flex-direction:column;align-items:center;gap:12px;padding:18px;background:#f6f7fb;color:#111}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>.card{max-width:920px;width:100%;background:white;padding:14px;border-radius:10px;box-shadow:0 6px 18px rgba(20,30,60,0.08)}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>video{width:100%;height:auto;border-radius:8px;background:#000}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>.controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>button{padding:8px 12px;border-radius:8px;border:1px solid #ddd;background:#fff;cursor:pointer}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>button.primary{background:#0b69ff;color:white;border-color:transparent}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>#resultDisplay{word-break:break-all;padding:8px;background:#f3f6ff;border-radius:6px;margin-top:8px}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>input#resultInput{width:100%;padding:8px;border-radius:6px;border:1px solid #ccc;margin-top:6px}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>.actions{display:flex;gap:8px;margin-top:8px}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>.log{font-size:12px;color:#666;margin-top:8px;max-height:140px;overflow:auto;background:#fff;padding:8px;border-radius:6px;border:1px solid #eee}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>small.note{color:#666}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>&lt;/style&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b>&lt;/head&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b>&lt;body&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>&lt;div class="card"&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>&lt;h2&gt;Scanner — QR &amp;amp; DataMatrix&lt;/h2&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>&lt;p&gt;Decoder: &lt;strong&gt;ZXing&lt;/strong&gt; (QR + DataMatrix). Funziona su HTTPS / localhost. Premi &lt;em&gt;Avvia camera&lt;/em&gt; (azione utente richiesta).&lt;/p&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>&lt;video id="video" muted playsinline&gt;&lt;/video&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>&lt;div class="controls"&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>&lt;button id="startBtn" class="primary"&gt;Avvia camera&lt;/button&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>&lt;button id="stopBtn"&gt;Ferma&lt;/button&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>&lt;select id="cameraSelect" aria-label="Seleziona fotocamera"&gt;&lt;/select&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>&lt;button id="flipBtn"&gt;Cambia fotocamera&lt;/button&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>&lt;label style="display:flex;gap:6px;align-items:center"&gt;&lt;input id="torch" type="checkbox"&gt; Torcia&lt;/label&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>&lt;input id="fileInput" type="file" accept="image/*" /&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>&lt;/div&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>&lt;div id="resultDisplay"&gt;Nessun risultato&lt;/div&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>&lt;input id="resultInput" placeholder="Il contenuto apparirà qui" readonly /&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>&lt;div class="actions" id="actions" style="display:none"&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>&lt;button id="openBtn"&gt;Apri&lt;/button&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>&lt;button id="copyBtn"&gt;Copia&lt;/button&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>&lt;button id="continueBtn"&gt;Continua scansione&lt;/button&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>&lt;/div&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>&lt;p&gt;&lt;small class="note"&gt;Se usi iPhone: apri in Safari normale (non come webapp aggiunta alla Home) per i permessi più affidabili.&lt;/small&gt;&lt;/p&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>&lt;div class="log" id="log"&gt;&lt;/div&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>&lt;/div&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>&lt;!-- ZXing UMD --&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>&lt;script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.19.1/umd/index.min.js"&gt;&lt;/script&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>&lt;script&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// ----- Helpers / UI -----</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const logEl = document.getElementById('log');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>function log(...args){ console.log(...args); logEl.innerText += args.map(a =&gt; (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ') + '\\n'; logEl.scrollTop = logEl.scrollHeight; }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const video = document.getElementById('video');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const startBtn = document.getElementById('startBtn');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const stopBtn = document.getElementById('stopBtn');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const cameraSelect = document.getElementById('cameraSelect');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const flipBtn = document.getElementById('flipBtn');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const torchCheckbox = document.getElementById('torch');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const fileInput = document.getElementById('fileInput');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const resultDisplay = document.getElementById('resultDisplay');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const resultInput = document.getElementById('resultInput');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const actions = document.getElementById('actions');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const openBtn = document.getElementById('openBtn');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const copyBtn = document.getElementById('copyBtn');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const continueBtn = document.getElementById('continueBtn');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// ----- ZXing / state -----</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>const ZX = window.ZXing;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>let zxingReader = null;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>let currentStream = null;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>let devices = [];</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>let currentDeviceId = null;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>let lastResult = null;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>let frameFallbackTimer = null;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// pick rear camera heuristics</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>function pickRearCamera(list){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(!list || list.length===0) return null;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>const re = /back|rear|environment|posteriore|posteri[oì]re|posteriore/i;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>for(const d of list) if(d.label &amp;&amp; re.test(d.label)) return d;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(list.length&gt;1) return list.find(d =&gt; /rear|posteriore|back/i.test((d.label||''))) || list[1];</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>return list[0];</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// enumerate devices (after user gesture)</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>async function enumerateVideoDevices(){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>const all = await navigator.mediaDevices.enumerateDevices();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>devices = all.filter(d=&gt;d.kind==='videoinput').map(d=&gt;({ id: d.deviceId, label: d.label || d.deviceId }));</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>cameraSelect.innerHTML = '';</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>devices.forEach(d=&gt;{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>const o = document.createElement('option');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>o.value = d.id;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>o.textContent = d.label;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>cameraSelect.appendChild(o);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>const rear = pickRearCamera(devices);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>if(rear){ cameraSelect.value = rear.id; currentDeviceId = rear.id; }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>else if(devices[0]){ cameraSelect.value = devices[0].id; currentDeviceId = devices[0].id; }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>log('Devices enumerated', devices);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>}catch(e){ log('enumerateVideoDevices error', e); }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// play video element safely</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>function playVideo(){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>return video.play ? video.play().catch(e=&gt;{ log('video.play err', e); }) : Promise.resolve();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// destroy reader and stop stream</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>function stopZXingReader(){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>if(zxingReader){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>zxingReader.reset();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>zxingReader = null;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>}catch(e){ log('stopZXingReader err', e); }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>async function stopStream(){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(frameFallbackTimer){ clearInterval(frameFallbackTimer); frameFallbackTimer = null; }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(currentStream){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>try{ currentStream.getTracks().forEach(t=&gt;t.stop()); }catch(e){}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>currentStream = null;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>video.srcObject = null;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// frame fallback: capture frame -&gt; create Image -&gt; decode with zxing (for devices where decodeFromVideoDevice unreliable)</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>function startFrameFallbackIfNeeded(reader){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(frameFallbackTimer) clearInterval(frameFallbackTimer);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>const canvas = document.createElement('canvas');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>const ctx = canvas.getContext('2d');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>frameFallbackTimer = setInterval(async ()=&gt;{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>try{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>if(!video.videoWidth || !video.videoHeight) return;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>const w = Math.min(1024, video.videoWidth);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>const h = Math.round(video.videoHeight * (w / video.videoWidth));</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>canvas.width = w; canvas.height = h;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>ctx.drawImage(video, 0, 0, w, h);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>// convert to blob then to image element for ZXing decodeFromImage</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>const dataUrl = canvas.toDataURL('image/png');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>const img = new Image();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>img.src = dataUrl;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>await img.decode().catch(()=&gt;{});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>try{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">          </span>const res = await reader.decodeFromImage(undefined, img);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">          </span>if(res &amp;&amp; res.text){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">            </span>log('fallback decoded via decodeFromImage:', res.text);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">            </span>handleDecoded(res.text);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">          </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>}catch(e){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">          </span>// not found or decode error -&gt; ignore</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>}catch(e){ /* ignore */ }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>}, 600);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// main start: create reader and use decodeFromVideoDevice</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>async function startCamera(deviceId){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>stopZXingReader();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>await stopStream();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>// request stream (user gesture expected)</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>const constraints = deviceId ? { video: { deviceId: { exact: deviceId }, width:{ ideal:1280 }, height:{ ideal:720 } } } : { video: { facingMode: 'environment', width:{ ideal:1280 }, height:{ ideal:720 } } };</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>currentStream = await navigator.mediaDevices.getUserMedia(constraints);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>video.srcObject = currentStream;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>await playVideo();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>// prepare ZXing reader with hints for only QR + Data Matrix (faster)</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>const hints = new Map();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>const DecodeHintType = ZX.DecodeHintType;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>const BarcodeFormat = ZX.BarcodeFormat;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>const formats = [BarcodeFormat.QR_CODE, BarcodeFormat.DATA_MATRIX];</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>// create reader</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>zxingReader = new ZX.BrowserMultiFormatReader(hints);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>// start decoding from device</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>const fromDeviceId = deviceId || undefined;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>zxingReader.decodeFromVideoDevice(fromDeviceId, video, (result, err) =&gt; {</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>if(result){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">          </span>// result.text holds decoded string</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">          </span>log('Decoded (video):', result.text);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">          </span>handleDecoded(result.text);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">          </span>// stop reader: decodeFromVideoDevice continues otherwise</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">          </span>try{ zxingReader.reset(); }catch(e){}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>if(err &amp;&amp; !(err instanceof ZX.NotFoundException)) {</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">          </span>// NotFoundException is normal while scanning; other errors may be interesting</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">          </span>log('ZXing decode error callback', err);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>// if no result after short delay, also enable fallback frame-scan</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>setTimeout(()=&gt; {</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>if(!lastResult &amp;&amp; zxingReader &amp;&amp; currentStream) startFrameFallbackIfNeeded(zxingReader);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>}, 1200);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>log('Scanner avviato su device', deviceId || 'default');</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>}catch(e){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>log('startCamera error', e);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>resultDisplay.textContent = 'Errore avvio camera: '+ (e &amp;&amp; e.message ? e.message : e);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// handle decoded text: populate UI and stop streams</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>async function handleDecoded(text){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(!text) return;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(text === lastResult) return; // avoid duplicates</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>lastResult = text;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>// write UI</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>resultDisplay.textContent = text;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{ resultInput.value = text; }catch(e){ log('Impossibile scrivere input', e); }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>actions.style.display = 'flex';</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>// try copy</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{ if(navigator.clipboard) await navigator.clipboard.writeText(String(text)); log('Copied to clipboard'); }catch(e){ log('Copy failed', e); }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>// vibrate + sound</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{ if(navigator.vibrate) navigator.vibrate(120); }catch(e){}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{ new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YRAAAAAA').play().catch(()=&gt;{}); }catch(e){}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>// stop everything to avoid overwriting</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{ if(zxingReader) zxingReader.reset(); }catch(e){}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>await stopStream();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// helpers: open/copy/continue</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>openBtn.addEventListener('click', ()=&gt;{ try{ const t = resultInput.value; if(t) window.open(t, '_blank'); }catch(e){ log('open err', e); }});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>copyBtn.addEventListener('click', async ()=&gt;{ try{ await navigator.clipboard.writeText(resultInput.value); resultDisplay.textContent = 'Copiato: '+resultInput.value; }catch(e){ log('copy err', e); }});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>continueBtn.addEventListener('click', async ()=&gt;{ actions.style.display = 'none'; resultDisplay.textContent = 'Riavvio scansione...'; lastResult = null; await startCamera(currentDeviceId || cameraSelect.value || null); });</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// start/stop UI handlers</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>startBtn.addEventListener('click', async ()=&gt;{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>startBtn.disabled = true;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>// user gesture: enumerate devices after permission</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>// try getUserMedia once to unlock labels (user gesture)</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>const tmp = await navigator.mediaDevices.getUserMedia({ video: true }).catch(e=&gt;{ log('init getUserMedia failed', e); return null; });</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>if(tmp){ tmp.getTracks().forEach(t=&gt;t.stop()); log('Permesso concesso (init)'); } else { log('Permesso non concesso (init)'); }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>}catch(e){ log('init getUserMedia error', e); }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>await enumerateVideoDevices();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>const preferred = currentDeviceId || cameraSelect.value || null;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>await startCamera(preferred);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>resultDisplay.textContent = 'In ascolto... inquadra un codice';</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>stopBtn.addEventListener('click', async ()=&gt;{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>startBtn.disabled = false;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{ if(zxingReader) zxingReader.reset(); }catch(e){}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>await stopStream();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>actions.style.display = 'none';</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>resultDisplay.textContent = 'Camera fermata';</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// flip camera</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>flipBtn.addEventListener('click', async ()=&gt;{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(!devices || devices.length === 0) return;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>const idx = devices.findIndex(d =&gt; d.id === currentDeviceId);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>const next = devices[(idx+1) % devices.length] || devices[0];</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>cameraSelect.value = next.id;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>currentDeviceId = next.id;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>await startCamera(next.id);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// manual select change</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>cameraSelect.addEventListener('change', async ()=&gt;{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>const id = cameraSelect.value;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(!id) return;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>currentDeviceId = id;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>await startCamera(id);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// torch control</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>torchCheckbox.addEventListener('change', async ()=&gt;{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>const on = torchCheckbox.checked;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(!currentStream) return;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>const track = currentStream.getVideoTracks()[0];</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(!track) return;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>await track.applyConstraints({ advanced: [{ torch: on }] });</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>}catch(e){ log('torch not supported', e); }</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// file input: decode image using ZXing decodeFromImage</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>fileInput.addEventListener('change', async (ev)=&gt;{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>const f = ev.target.files &amp;&amp; ev.target.files[0];</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>if(!f) return;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>resultDisplay.textContent = 'Scansione immagine...';</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>try{</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>const img = new Image();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>img.src = URL.createObjectURL(f);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>await img.decode().catch(()=&gt;{});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>if(!zxingReader) {</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>// create a temporary reader</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>const tmpHints = new Map();</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>tmpHints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, [ZX.BarcodeFormat.QR_CODE, ZX.BarcodeFormat.DATA_MATRIX]);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">        </span>zxingReader = new ZX.BrowserMultiFormatReader(tmpHints);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>const res = await zxingReader.decodeFromImage(undefined, img);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>if(res &amp;&amp; res.text) handleDecoded(res.text);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>else resultDisplay.textContent = 'Nessun codice trovato';</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>}catch(e){</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>log('file decode error', e);</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">      </span>resultDisplay.textContent = 'Errore decodifica immagine';</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">    </span>}</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>});</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>// On page unload cleanup</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>window.addEventListener('beforeunload', async ()=&gt;{ try{ if(zxingReader) zxingReader.reset(); }catch(e){} await stopStream(); });</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff; min-height: 21.0px"><span class="s1"><b></b></span><br></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b><span class="Apple-converted-space">  </span>&lt;/script&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b>&lt;/body&gt;</b></span></h2>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px 'Helvetica Neue'; color: #0e0e0e; -webkit-text-stroke: #0e0e0e; background-color: #ffffff"><span class="s1"><b>&lt;/html&gt;</b></span></h2>
 </body>
 </html>
