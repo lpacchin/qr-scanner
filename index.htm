@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Scanner (QR + DataMatrix)</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;display:flex;flex-direction:column;align-items:center;gap:12px;padding:18px;background:#f6f7fb;color:#111}
+    .card{max-width:920px;width:100%;background:white;padding:14px;border-radius:10px;box-shadow:0 6px 18px rgba(20,30,60,0.08)}
+    video{width:100%;height:auto;border-radius:8px;background:#000}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    button{padding:8px 12px;border-radius:8px;border:1px solid #ddd;background:#fff;cursor:pointer}
+    button.primary{background:#0b69ff;color:white;border-color:transparent}
+    #resultDisplay{word-break:break-all;padding:8px;background:#f3f6ff;border-radius:6px;margin-top:8px}
+    input#resultInput{width:100%;padding:8px;border-radius:6px;border:1px solid #ccc;margin-top:6px}
+    .actions{display:flex;gap:8px;margin-top:8px}
+    .log{font-size:12px;color:#666;margin-top:8px;max-height:140px;overflow:auto;background:#fff;padding:8px;border-radius:6px;border:1px solid #eee}
+    small.note{color:#666}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Scanner — QR &amp; DataMatrix</h2>
+    <p>Decoder: <strong>ZXing</strong> (QR + DataMatrix). Funziona su HTTPS / localhost. Premi <em>Avvia camera</em> (azione utente richiesta).</p>
+
+    <video id="video" muted playsinline></video>
+
+    <div class="controls">
+      <button id="startBtn" class="primary">Avvia camera</button>
+      <button id="stopBtn">Ferma</button>
+      <select id="cameraSelect" aria-label="Seleziona fotocamera"></select>
+      <button id="flipBtn">Cambia fotocamera</button>
+      <label style="display:flex;gap:6px;align-items:center"><input id="torch" type="checkbox"> Torcia</label>
+      <input id="fileInput" type="file" accept="image/*" />
+    </div>
+
+    <div id="resultDisplay">Nessun risultato</div>
+    <input id="resultInput" placeholder="Il contenuto apparirà qui" readonly />
+    <div class="actions" id="actions" style="display:none">
+      <button id="openBtn">Apri</button>
+      <button id="copyBtn">Copia</button>
+      <button id="continueBtn">Continua scansione</button>
+    </div>
+
+    <p><small class="note">Se usi iPhone: apri in Safari normale (non come webapp aggiunta alla Home) per i permessi più affidabili.</small></p>
+    <div class="log" id="log"></div>
+  </div>
+
+  <!-- ZXing UMD -->
+  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.19.1/umd/index.min.js"></script>
+
+  <script>
+  // ----- Helpers / UI -----
+  const logEl = document.getElementById('log');
+  function log(...args){ console.log(...args); logEl.innerText += args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ') + '\\n'; logEl.scrollTop = logEl.scrollHeight; }
+
+  const video = document.getElementById('video');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const cameraSelect = document.getElementById('cameraSelect');
+  const flipBtn = document.getElementById('flipBtn');
+  const torchCheckbox = document.getElementById('torch');
+  const fileInput = document.getElementById('fileInput');
+
+  const resultDisplay = document.getElementById('resultDisplay');
+  const resultInput = document.getElementById('resultInput');
+  const actions = document.getElementById('actions');
+  const openBtn = document.getElementById('openBtn');
+  const copyBtn = document.getElementById('copyBtn');
+  const continueBtn = document.getElementById('continueBtn');
+
+  // ----- ZXing / state -----
+  const ZX = window.ZXing;
+  let zxingReader = null;
+  let currentStream = null;
+  let devices = [];
+  let currentDeviceId = null;
+  let lastResult = null;
+  let frameFallbackTimer = null;
+
+  // pick rear camera heuristics
+  function pickRearCamera(list){
+    if(!list || list.length===0) return null;
+    const re = /back|rear|environment|posteriore|posteri[oì]re|posteriore/i;
+    for(const d of list) if(d.label && re.test(d.label)) return d;
+    if(list.length>1) return list.find(d => /rear|posteriore|back/i.test((d.label||''))) || list[1];
+    return list[0];
+  }
+
+  // enumerate devices (after user gesture)
+  async function enumerateVideoDevices(){
+    try{
+      const all = await navigator.mediaDevices.enumerateDevices();
+      devices = all.filter(d=>d.kind==='videoinput').map(d=>({ id: d.deviceId, label: d.label || d.deviceId }));
+      cameraSelect.innerHTML = '';
+      devices.forEach(d=>{
+        const o = document.createElement('option');
+        o.value = d.id;
+        o.textContent = d.label;
+        cameraSelect.appendChild(o);
+      });
+      const rear = pickRearCamera(devices);
+      if(rear){ cameraSelect.value = rear.id; currentDeviceId = rear.id; }
+      else if(devices[0]){ cameraSelect.value = devices[0].id; currentDeviceId = devices[0].id; }
+      log('Devices enumerated', devices);
+    }catch(e){ log('enumerateVideoDevices error', e); }
+  }
+
+  // play video element safely
+  function playVideo(){
+    return video.play ? video.play().catch(e=>{ log('video.play err', e); }) : Promise.resolve();
+  }
+
+  // destroy reader and stop stream
+  function stopZXingReader(){
+    try{
+      if(zxingReader){
+        zxingReader.reset();
+        zxingReader = null;
+      }
+    }catch(e){ log('stopZXingReader err', e); }
+  }
+  async function stopStream(){
+    if(frameFallbackTimer){ clearInterval(frameFallbackTimer); frameFallbackTimer = null; }
+    if(currentStream){
+      try{ currentStream.getTracks().forEach(t=>t.stop()); }catch(e){}
+      currentStream = null;
+      video.srcObject = null;
+    }
+  }
+
+  // frame fallback: capture frame -> create Image -> decode with zxing (for devices where decodeFromVideoDevice unreliable)
+  function startFrameFallbackIfNeeded(reader){
+    if(frameFallbackTimer) clearInterval(frameFallbackTimer);
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    frameFallbackTimer = setInterval(async ()=>{
+      try{
+        if(!video.videoWidth || !video.videoHeight) return;
+        const w = Math.min(1024, video.videoWidth);
+        const h = Math.round(video.videoHeight * (w / video.videoWidth));
+        canvas.width = w; canvas.height = h;
+        ctx.drawImage(video, 0, 0, w, h);
+        // convert to blob then to image element for ZXing decodeFromImage
+        const dataUrl = canvas.toDataURL('image/png');
+        const img = new Image();
+        img.src = dataUrl;
+        await img.decode().catch(()=>{});
+        try{
+          const res = await reader.decodeFromImage(undefined, img);
+          if(res && res.text){
+            log('fallback decoded via decodeFromImage:', res.text);
+            handleDecoded(res.text);
+          }
+        }catch(e){
+          // not found or decode error -> ignore
+        }
+      }catch(e){ /* ignore */ }
+    }, 600);
+  }
+
+  // main start: create reader and use decodeFromVideoDevice
+  async function startCamera(deviceId){
+    try{
+      stopZXingReader();
+      await stopStream();
+
+      // request stream (user gesture expected)
+      const constraints = deviceId ? { video: { deviceId: { exact: deviceId }, width:{ ideal:1280 }, height:{ ideal:720 } } } : { video: { facingMode: 'environment', width:{ ideal:1280 }, height:{ ideal:720 } } };
+      currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = currentStream;
+      await playVideo();
+
+      // prepare ZXing reader with hints for only QR + Data Matrix (faster)
+      const hints = new Map();
+      const DecodeHintType = ZX.DecodeHintType;
+      const BarcodeFormat = ZX.BarcodeFormat;
+      const formats = [BarcodeFormat.QR_CODE, BarcodeFormat.DATA_MATRIX];
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
+
+      // create reader
+      zxingReader = new ZX.BrowserMultiFormatReader(hints);
+      // start decoding from device
+      const fromDeviceId = deviceId || undefined;
+      zxingReader.decodeFromVideoDevice(fromDeviceId, video, (result, err) => {
+        if(result){
+          // result.text holds decoded string
+          log('Decoded (video):', result.text);
+          handleDecoded(result.text);
+          // stop reader: decodeFromVideoDevice continues otherwise
+          try{ zxingReader.reset(); }catch(e){}
+        }
+        if(err && !(err instanceof ZX.NotFoundException)) {
+          // NotFoundException is normal while scanning; other errors may be interesting
+          log('ZXing decode error callback', err);
+        }
+      });
+
+      // if no result after short delay, also enable fallback frame-scan
+      setTimeout(()=> {
+        if(!lastResult && zxingReader && currentStream) startFrameFallbackIfNeeded(zxingReader);
+      }, 1200);
+
+      log('Scanner avviato su device', deviceId || 'default');
+    }catch(e){
+      log('startCamera error', e);
+      resultDisplay.textContent = 'Errore avvio camera: '+ (e && e.message ? e.message : e);
+    }
+  }
+
+  // handle decoded text: populate UI and stop streams
+  async function handleDecoded(text){
+    if(!text) return;
+    if(text === lastResult) return; // avoid duplicates
+    lastResult = text;
+    // write UI
+    resultDisplay.textContent = text;
+    try{ resultInput.value = text; }catch(e){ log('Impossibile scrivere input', e); }
+    actions.style.display = 'flex';
+    // try copy
+    try{ if(navigator.clipboard) await navigator.clipboard.writeText(String(text)); log('Copied to clipboard'); }catch(e){ log('Copy failed', e); }
+    // vibrate + sound
+    try{ if(navigator.vibrate) navigator.vibrate(120); }catch(e){}
+    try{ new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YRAAAAAA').play().catch(()=>{}); }catch(e){}
+    // stop everything to avoid overwriting
+    try{ if(zxingReader) zxingReader.reset(); }catch(e){}
+    await stopStream();
+  }
+
+  // helpers: open/copy/continue
+  openBtn.addEventListener('click', ()=>{ try{ const t = resultInput.value; if(t) window.open(t, '_blank'); }catch(e){ log('open err', e); }});
+  copyBtn.addEventListener('click', async ()=>{ try{ await navigator.clipboard.writeText(resultInput.value); resultDisplay.textContent = 'Copiato: '+resultInput.value; }catch(e){ log('copy err', e); }});
+  continueBtn.addEventListener('click', async ()=>{ actions.style.display = 'none'; resultDisplay.textContent = 'Riavvio scansione...'; lastResult = null; await startCamera(currentDeviceId || cameraSelect.value || null); });
+
+  // start/stop UI handlers
+  startBtn.addEventListener('click', async ()=>{
+    startBtn.disabled = true;
+    // user gesture: enumerate devices after permission
+    try{
+      // try getUserMedia once to unlock labels (user gesture)
+      const tmp = await navigator.mediaDevices.getUserMedia({ video: true }).catch(e=>{ log('init getUserMedia failed', e); return null; });
+      if(tmp){ tmp.getTracks().forEach(t=>t.stop()); log('Permesso concesso (init)'); } else { log('Permesso non concesso (init)'); }
+    }catch(e){ log('init getUserMedia error', e); }
+
+    await enumerateVideoDevices();
+    const preferred = currentDeviceId || cameraSelect.value || null;
+    await startCamera(preferred);
+    resultDisplay.textContent = 'In ascolto... inquadra un codice';
+  });
+
+  stopBtn.addEventListener('click', async ()=>{
+    startBtn.disabled = false;
+    try{ if(zxingReader) zxingReader.reset(); }catch(e){}
+    await stopStream();
+    actions.style.display = 'none';
+    resultDisplay.textContent = 'Camera fermata';
+  });
+
+  // flip camera
+  flipBtn.addEventListener('click', async ()=>{
+    if(!devices || devices.length === 0) return;
+    const idx = devices.findIndex(d => d.id === currentDeviceId);
+    const next = devices[(idx+1) % devices.length] || devices[0];
+    cameraSelect.value = next.id;
+    currentDeviceId = next.id;
+    await startCamera(next.id);
+  });
+
+  // manual select change
+  cameraSelect.addEventListener('change', async ()=>{
+    const id = cameraSelect.value;
+    if(!id) return;
+    currentDeviceId = id;
+    await startCamera(id);
+  });
+
+  // torch control
+  torchCheckbox.addEventListener('change', async ()=>{
+    const on = torchCheckbox.checked;
+    if(!currentStream) return;
+    const track = currentStream.getVideoTracks()[0];
+    if(!track) return;
+    try{
+      await track.applyConstraints({ advanced: [{ torch: on }] });
+    }catch(e){ log('torch not supported', e); }
+  });
+
+  // file input: decode image using ZXing decodeFromImage
+  fileInput.addEventListener('change', async (ev)=>{
+    const f = ev.target.files && ev.target.files[0];
+    if(!f) return;
+    resultDisplay.textContent = 'Scansione immagine...';
+    try{
+      const img = new Image();
+      img.src = URL.createObjectURL(f);
+      await img.decode().catch(()=>{});
+      if(!zxingReader) {
+        // create a temporary reader
+        const tmpHints = new Map();
+        tmpHints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, [ZX.BarcodeFormat.QR_CODE, ZX.BarcodeFormat.DATA_MATRIX]);
+        zxingReader = new ZX.BrowserMultiFormatReader(tmpHints);
+      }
+      const res = await zxingReader.decodeFromImage(undefined, img);
+      if(res && res.text) handleDecoded(res.text);
+      else resultDisplay.textContent = 'Nessun codice trovato';
+    }catch(e){
+      log('file decode error', e);
+      resultDisplay.textContent = 'Errore decodifica immagine';
+    }
+  });
+
+  // On page unload cleanup
+  window.addEventListener('beforeunload', async ()=>{ try{ if(zxingReader) zxingReader.reset(); }catch(e){} await stopStream(); });
+
+  </script>
+</body>
+</html>
